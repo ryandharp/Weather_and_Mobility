@@ -19,6 +19,7 @@ import time
 fname = '2018-01'
 date_start = '2018-01-01'
 date_end = '2018-01-31'
+naics_list = [722511, 512131]  # naics categories to examine
 
 
 #%% Loading Data
@@ -29,10 +30,11 @@ df = pd.read_csv('./test_data/mobility_data/2018-01/'+fname+'-part1.csv')  # TOD
 df_mobility = df.filter(['placekey', 'safegraph_place_id', 'naics_code', 'latitude', 'longitude', 'city', 'state',
         'region', 'date_range_start', 'date_range_end', 'raw_visit_counts', 'raw_visitor_counts', 'visits_by_day',
         'visitor_home_cbgs', 'poi_cbg'])
-df_mobility = df.loc[(df_mobility['naics_code'] == 722511) | (df_mobility['naics_code'] == 512131)]  # filtering by relevant NAICS codes (722511 (restaurants) and 512131 (movie theaters) for now)
+df_mobility = df_mobility[df_mobility['naics_code'].isin(naics_list)]
+# df_mobility['poi_cbg'] = df_mobility['poi_cbg'].astype(str)
+# df_mobility.loc[df_mobility['poi_cbg'].str.len() < 12, 'poi_cbg'] = '0' + df_mobility['poi_cbg'][df_mobility['poi_cbg'].str.len() < 12]
 df_mobility = df_mobility.reset_index()
 del df
-# naics_list = [722511, 512131] # TODO: use in naics_list instead for filtering
 
 # loading in cbg normalization data
 df = pd.read_csv('./test_data/census_data/data/cbg_b01.csv')
@@ -46,75 +48,86 @@ del df
 # loading in county normalization data
 df = pd.read_csv('./test_data/county_data/county_devices_residing.csv')
 # df['county'][df['county'].str.len() < 5] = '0' + df['county'][df['county'].str.len() < 5]
-df_test = df.filter(['county', 'county_population', fname])
-df_test = df_test['county_population']/df_test[fname]
-df_county_pop_panel_size = dict(zip(df['county'], df_test))
-del df
-del df_test
+df_county_pop_panel_size = df.filter(['county', 'county_population', fname])
+df_county_pop_panel_size = df_county_pop_panel_size['county_population'] / df_county_pop_panel_size[fname]
+county_pop_panel_size_lookup = dict(zip(df['county'], df_county_pop_panel_size))
+del df, df_county_pop_panel_size
 
 # loading in cbg-month factors
 df = pd.read_csv('./test_data/home_panel_summary/cbg_factors_by_month.csv', dtype={'cbg': str})
-df['cbg'][df['cbg'].str.len() < 12] = '0' + df['cbg'][df['cbg'].str.len() < 12]
-df_cbg_month_factors = dict(zip(df['cbg'].astype(str), df[fname]))
-del df
+df_cbg_month_factors = df.copy()
+df_cbg_month_factors.loc[df['cbg'].str.len() < 12, 'cbg'] = '0' + df['cbg'][df['cbg'].str.len() < 12]
+cbg_month_factors_lookup = dict(zip(df['cbg'].astype(str), df[fname]))
+del df, df_cbg_month_factors
+
+
+#%% Preprocessing
+
+t = time.time()
+
+# pulling and parsing visits_by_day string
+visits_by_day_str = df_mobility['visits_by_day'].astype('string')
+visits_by_day_str_parsed = visits_by_day_str.str.lstrip('[')
+visits_by_day_str_parsed = visits_by_day_str_parsed.str.rstrip(']')
+visits_by_day_str_parsed = visits_by_day_str_parsed.dropna()
+s_visits_by_day = pd.Series([np.array(x.split(',')).astype(int) for x in visits_by_day_str_parsed], name='visits_by_day')  # converting to integer
+df_visits_by_day = s_visits_by_day.to_frame()
+df_visits_by_day.index = visits_by_day_str_parsed.index
+del visits_by_day_str, visits_by_day_str_parsed, s_visits_by_day
+
+# pulling monthly raw visit and visitor counts
+df_visitors_by_month = df_mobility['raw_visitor_counts'].dropna().astype(int)
+df_visits_by_month = df_mobility['raw_visit_counts'].dropna().astype(int)
+
+# pulling poi cbg and county IDs
+poi_cbg = df_mobility['poi_cbg'].dropna().astype(int).astype(str)
+poi_county = poi_cbg.str.slice(0, 5)
+poi_county[poi_cbg.str.len() < 12] = '0' + poi_cbg.str.slice(0, 4)  # adding on stripped leading zeroes
+poi_county = poi_county.astype(int)
+
+# pulling and preprocessing poi monthly visitor home cbgs
+poi_monthly_visitor_home_cbg_str = df_mobility['visitor_home_cbgs'].astype('string')
+poi_monthly_visitor_home_cbg_str = poi_monthly_visitor_home_cbg_str.dropna()
+poi_monthly_visitor_home_cbg_str = poi_monthly_visitor_home_cbg_str.str.replace(':4,', ':3,')  # replacing counts of 4 with three since a value of 4 could represent 2, 3, or 4
+poi_monthly_visitor_home_cbg_str = poi_monthly_visitor_home_cbg_str.str.replace(':4}', ':3}')
+poi_monthly_visitor_home_cbg_lookup = poi_monthly_visitor_home_cbg_str.apply(lambda x: eval(x))
+poi_monthly_visitor_home_cbg_lookup = poi_monthly_visitor_home_cbg_lookup.rename('dict')
+poi_monthly_visitor_home_cbg = poi_monthly_visitor_home_cbg_lookup.apply(lambda row: list(row.keys()))
+poi_monthly_visitor_home_cbg = poi_monthly_visitor_home_cbg.rename('poi_monthly_visitor_home_cbg')
+del poi_monthly_visitor_home_cbg_str
+
+# calculating unassigned visits
+total_visits_from_ided_cbg = poi_monthly_visitor_home_cbg_lookup.apply(lambda row: sum(row.values()))
+poi_county_factor_weight = df_visitors_by_month - total_visits_from_ided_cbg  # assinging visits outside of number identified by visitor cbg to the county level
+poi_county_factor_weight[poi_county_factor_weight < 0] = 0
+
+# pulling poi county factor
+poi_county_factor = poi_county.apply(lambda row: county_pop_panel_size_lookup.get(row))
 
 
 #%% Analysis
 
-t = time.time()
+df_poi_monthly_visitor_home_cbg = pd.DataFrame(poi_monthly_visitor_home_cbg)
 
-visits_by_day_str = df_mobility['visits_by_day'].astype('string')
-visits_by_day_parse = visits_by_day_str.str.lstrip('[')
-visits_by_day_parse = visits_by_day_parse.str.rstrip(']')
-parsed = visits_by_day_parse.dropna()
-test = pd.Series([np.array(x.split(',')).astype(int) for x in parsed], name='visits_by_day')
-test2 = test.to_frame()
-test2.index = parsed.index
+# core processing sequence > exploding out visitor home cbg to calculte appropriate factors
+visits_from_ided_cbg = df_poi_monthly_visitor_home_cbg.apply(lambda row: np.array(list(map(poi_monthly_visitor_home_cbg_lookup[row.name].get, row[0]))), axis=1)
+ided_cbg_factor = df_poi_monthly_visitor_home_cbg.apply(lambda row: np.array(list(map(cbg_month_factors_lookup.get, row[0]))), axis=1)
 
-visitors_by_month = df_mobility['raw_visitor_counts'].dropna().astype(int)
-visits_by_month = df_mobility['raw_visit_counts'].dropna().astype(int)
+# handling bad cbg match cases
+ided_cbg_is_none = ided_cbg_factor.apply(lambda row: np.isnan(row.astype(float)).any())
+df_ided_cbg_is_none = pd.DataFrame(ided_cbg_factor[ided_cbg_is_none])
+for index, row in df_ided_cbg_is_none.iterrows():
+    visits_from_ided_cbg[index] = visits_from_ided_cbg[index][ided_cbg_factor[index] != None]
+    ided_cbg_factor[index] = ided_cbg_factor[index][ided_cbg_factor[index] != None]
 
-poi_cbg = df_mobility['poi_cbg'].dropna().astype(int).astype(str)
-poi_county = poi_cbg.str.slice(0, 5)
-poi_county[poi_cbg.str.len() < 12] = '0' + poi_cbg.str.slice(0, 4)
-poi_county = poi_county.astype(int)
+# calculating poi monthly average scaling factor
+scaled_visits_from_ided_cbg = visits_from_ided_cbg * ided_cbg_factor
+poi_monthly_factor = (scaled_visits_from_ided_cbg.apply(np.sum, axis=0) + poi_county_factor_weight * poi_county_factor) / df_visits_by_month
+poi_monthly_factor = poi_monthly_factor.rename('factors')
 
-poi_visitor_home_cbg = df_mobility['visitor_home_cbgs'].astype('string')
-a = poi_visitor_home_cbg.dropna()
-a = a.str.replace(':4,', ':3,')  # replacing counts of 4 with three since a value of 4 could represent 2, 3, or 4
-a = a.str.replace(':4}', ':3}')
-b = a.apply(lambda x: eval(x))
-b = b.rename('dict')
-c = b.apply(lambda x: list(x.keys()))
-c = c.rename('visitor_home_cbgs')
-df_combined = pd.concat([c, b], axis=1)
-
-cbg_weight = b.apply(lambda x: sum(x.values()))
-county_weight = visitors_by_month - cbg_weight
-county_weight[county_weight < 0] = 0
-poi_county_factor = poi_county.apply(lambda x: df_county_pop_panel_size.get(x))
-# county_factor = poi_county.apply(lambda row: poi_county)
-
-c_lim = pd.DataFrame(c)
-
-
-test_d = c_lim.apply(lambda row: np.array(list(map(b[row.name].get, row[0]))), axis=1)
-test_e = c_lim.apply(lambda row: np.array(list(map(df_cbg_month_factors.get, row[0]))), axis=1)
-test_e_is_none = test_e.apply(lambda row: np.isnan(row.astype(float)).any())
-# test_e[test_e_is_none] = test_e[test_e_is_none].apply(lambda row: row[row != None])
-test_f = pd.DataFrame(test_e[test_e_is_none])
-# test_d[test_e_is_none] = test_d[test_e_is_none].apply(lambda row: row[test_e[row.name]])
-for index, row in test_f.iterrows():
-    test_d[index] = test_d[index][test_e[index] != None]
-    test_e[index] = test_e[index][test_e[index] != None]
-test_g = test_d * test_e
-test_h = (test_g.apply(np.sum, axis=0) + county_weight * poi_county_factor)/visits_by_month
-test_h = test_h.rename('factors')
-
-test_i = pd.concat([test2, test_h], axis=1)
-
-#ctrue_visits_by_day = test2.apply(lambda row: test_h[row.name] * row[0])
-true_visits_by_day = test_i['visits_by_day'] * test_i['factors']
+# applying scaling factor
+df_visits_by_day_and_factor = pd.concat([df_visits_by_day, poi_monthly_factor], axis=1)
+poi_scaled_visits_by_day = df_visits_by_day_and_factor['visits_by_day'] * df_visits_by_day_and_factor['factors']
 
 elapsed = time.time() - t
 print(elapsed)
