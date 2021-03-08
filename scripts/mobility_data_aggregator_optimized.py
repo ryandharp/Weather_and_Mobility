@@ -49,15 +49,15 @@ del df
 df = pd.read_csv('./test_data/county_data/county_devices_residing.csv')
 # df['county'][df['county'].str.len() < 5] = '0' + df['county'][df['county'].str.len() < 5]
 df_county_pop_panel_size = df.filter(['county', 'county_population', fname])
-df_county_pop_panel_size = df_county_pop_panel_size['county_population'] / df_county_pop_panel_size[fname]
-county_pop_panel_size_lookup = dict(zip(df['county'], df_county_pop_panel_size))
-del df, df_county_pop_panel_size
+df_county_factor = df_county_pop_panel_size['county_population'] / df_county_pop_panel_size[fname]
+county_factor_lookup = dict(zip(df_county_pop_panel_size['county'], df_county_factor))
+del df, df_county_pop_panel_size, df_county_factor
 
 # loading in cbg-month factors
 df = pd.read_csv('./test_data/home_panel_summary/cbg_factors_by_month.csv', dtype={'cbg': str})
 df_cbg_month_factors = df.copy()
 df_cbg_month_factors.loc[df['cbg'].str.len() < 12, 'cbg'] = '0' + df['cbg'][df['cbg'].str.len() < 12]
-cbg_month_factors_lookup = dict(zip(df['cbg'].astype(str), df[fname]))
+cbg_month_factors_lookup = dict(zip(df_cbg_month_factors['cbg'].astype(str), df[fname]))
 del df, df_cbg_month_factors
 
 
@@ -81,16 +81,15 @@ df_visits_by_month = df_mobility['raw_visit_counts'].dropna().astype(int)
 
 # pulling poi cbg and county IDs
 poi_cbg = df_mobility['poi_cbg'].dropna().astype(int).astype(str)
-poi_county = poi_cbg.str.slice(0, 5)
-poi_county[poi_cbg.str.len() < 12] = '0' + poi_cbg.str.slice(0, 4)  # adding on stripped leading zeroes
-poi_county = poi_county.astype(int)
+poi_cbg[poi_cbg.str.len() < 12] = '0' + poi_cbg[poi_cbg.str.len() < 12]  # adding on stripped leading zeroes
+poi_county = poi_cbg.str.slice(0, 5).astype(int)
 
 # pulling and preprocessing poi monthly visitor home cbgs
 poi_monthly_visitor_home_cbg_str = df_mobility['visitor_home_cbgs'].astype('string')
 poi_monthly_visitor_home_cbg_str = poi_monthly_visitor_home_cbg_str.dropna()
 poi_monthly_visitor_home_cbg_str = poi_monthly_visitor_home_cbg_str.str.replace(':4,', ':3,')  # replacing counts of 4 with three since a value of 4 could represent 2, 3, or 4
 poi_monthly_visitor_home_cbg_str = poi_monthly_visitor_home_cbg_str.str.replace(':4}', ':3}')
-poi_monthly_visitor_home_cbg_lookup = poi_monthly_visitor_home_cbg_str.apply(lambda x: eval(x))
+poi_monthly_visitor_home_cbg_lookup = poi_monthly_visitor_home_cbg_str.apply(lambda row: eval(row))
 poi_monthly_visitor_home_cbg_lookup = poi_monthly_visitor_home_cbg_lookup.rename('dict')
 poi_monthly_visitor_home_cbg = poi_monthly_visitor_home_cbg_lookup.apply(lambda row: list(row.keys()))
 poi_monthly_visitor_home_cbg = poi_monthly_visitor_home_cbg.rename('poi_monthly_visitor_home_cbg')
@@ -102,7 +101,7 @@ poi_county_factor_weight = df_visitors_by_month - total_visits_from_ided_cbg  # 
 poi_county_factor_weight[poi_county_factor_weight < 0] = 0
 
 # pulling poi county factor
-poi_county_factor = poi_county.apply(lambda row: county_pop_panel_size_lookup.get(row))
+poi_county_factor = poi_county.apply(lambda row: county_factor_lookup.get(row))
 
 
 #%% Analysis
